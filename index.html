@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WebVTT Tester with 30fps Time Management</title>
+    <title>WebVTT Tester with Improved First Line Handling</title>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.10.5/cdn.min.js" defer></script>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
@@ -26,29 +26,29 @@
 </head>
 <body class="bg-gray-100 font-sans" x-data="webVTTTester">
     <div class="container mx-auto px-4 py-8">
-        <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">WebVTT Tester (30fps時間管理版)</h1>
-        
+        <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">WebVTT Tester (最初の行改善版)</h1>
+
         <div class="mb-4">
             <label for="audioFile" class="block text-sm font-medium text-gray-700 mb-1">音声ファイル：</label>
             <input type="file" id="audioFile" @change="handleAudioFileSelect" accept="audio/*" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
         </div>
-        
+
         <div class="mb-4">
             <label for="vttFile" class="block text-sm font-medium text-gray-700 mb-1">WebVTTファイル：</label>
             <input type="file" id="vttFile" @change="handleVTTFileSelect" accept=".vtt" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
         </div>
-        
+
         <button @click="loadMedia" class="w-full bg-indigo-600 text-white font-bold py-2 px-4 rounded hover:bg-indigo-700 transition duration-300">ロード</button>
-        
+
         <div class="mt-6">
             <audio x-ref="audio" controls class="w-full">
                 <track x-ref="track" kind="subtitles" srclang="ja" label="日本語" default>
                 お使いのブラウザは audio タグをサポートしていません。
             </audio>
         </div>
-        
+
         <div id="transcript" class="mt-6 bg-white p-4 rounded-lg shadow"></div>
-        
+
         <div class="mt-6 bg-gray-200 p-4 rounded-lg">
             <h2 class="text-lg font-bold mb-2">デバッグ情報:</h2>
             <pre x-text="debugInfo" class="whitespace-pre-wrap"></pre>
@@ -64,19 +64,25 @@
             for (let i = 0; i < lines.length; i++) {
                 const line = lines[i].trim();
                 if (line === 'WEBVTT' || line === '' || /^\d+$/.test(line)) continue;
-                
+
                 if (line.includes('-->')) {
                     const [start, end] = line.split('-->').map(time => time.trim());
-                    currentCue = { start, end, text: '' };
+                    currentCue = { start, end, words: [] };
                     cues.push(currentCue);
                 } else if (currentCue) {
                     const words = line.split(/<(\d{2}:\d{2}:\d{2}\.\d{3})>/);
+                    let lastTimestamp = currentCue.start;
                     for (let j = 0; j < words.length; j += 2) {
-                        const word = words[j].trim();
-                        const timestamp = words[j + 1] || currentCue.end;
-                        if (word) {
-                            currentCue.text += `<span class="word-timestamp" data-time="${timestamp}"><span class="timestamp">${timestamp}</span>${word}</span>`;
+                        const word = words[j];
+                        const timestamp = words[j + 1] || lastTimestamp;
+                        if (word !== '') {
+                            currentCue.words.push({ text: word, start: lastTimestamp, end: timestamp });
                         }
+                        lastTimestamp = timestamp;
+                    }
+                    // 最後の単語の終了時間を行の終了時間に設定
+                    if (currentCue.words.length > 0) {
+                        currentCue.words[currentCue.words.length - 1].end = currentCue.end;
                     }
                 }
             }
@@ -91,7 +97,6 @@
                 debugInfo: '',
                 audioLoaded: false,
                 animationFrameId: null,
-                lastUpdateTime: 0,
                 currentPlaybackTime: 0,
                 fpsInterval: 1000 / 30, // 30fps
 
@@ -121,7 +126,7 @@
                     if (this.audioFile && this.vttFile) {
                         const audio = this.$refs.audio;
                         audio.src = URL.createObjectURL(this.audioFile);
-                        
+
                         const reader = new FileReader();
                         reader.onload = (e) => {
                             const vttContent = e.target.result;
@@ -194,7 +199,7 @@
 
                 updateTranscript(currentTime) {
                     const transcriptParagraphs = document.querySelectorAll('#transcript p');
-                    
+
                     transcriptParagraphs.forEach(p => {
                         const start = this.parseTimestamp(p.dataset.start);
                         const end = this.parseTimestamp(p.dataset.end);
@@ -212,7 +217,14 @@
                 generateTranscriptHTML(cues) {
                     let transcriptHtml = '';
                     cues.forEach((cue, index) => {
-                        transcriptHtml += `<p class="mb-2" data-start="${cue.start}" data-end="${cue.end}">${cue.text}</p>`;
+                        let cueHtml = `<p class="mb-2" data-start="${cue.start}" data-end="${cue.end}">`;
+                        cue.words.forEach(word => {
+                            cueHtml += `<span class="word-timestamp" data-start="${word.start}" data-end="${word.end}">
+                                            <span class="timestamp">${word.start} - ${word.end}</span>${word.text}
+                                        </span>`;
+                        });
+                        cueHtml += '</p>';
+                        transcriptHtml += cueHtml;
                     });
                     document.getElementById('transcript').innerHTML = transcriptHtml;
                     this.addDebugInfo('Transcript HTML generated.');
@@ -220,10 +232,10 @@
 
                 highlightWords(paragraph, currentTime) {
                     const words = paragraph.querySelectorAll('.word-timestamp');
-                    const endTime = this.parseTimestamp(paragraph.dataset.end);
-                    words.forEach((word, index) => {
-                        const time = this.parseTimestamp(word.dataset.time);
-                        if (currentTime >= time || (index === words.length - 1 && currentTime >= endTime)) {
+                    words.forEach(word => {
+                        const start = this.parseTimestamp(word.dataset.start);
+                        const end = this.parseTimestamp(word.dataset.end);
+                        if (currentTime >= start && currentTime < end) {
                             word.classList.add('bg-yellow-200');
                         } else {
                             word.classList.remove('bg-yellow-200');
