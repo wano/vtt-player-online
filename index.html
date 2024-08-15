@@ -1,0 +1,249 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebVTT Tester with 30fps Time Management</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.10.5/cdn.min.js" defer></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .word-timestamp {
+            display: inline-block;
+            position: relative;
+        }
+        .word-timestamp .timestamp {
+            position: absolute;
+            top: -1.5em;
+            left: 0;
+            font-size: 0.75em;
+            color: #666;
+            display: none;
+        }
+        .word-timestamp:hover .timestamp {
+            display: block;
+        }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans" x-data="webVTTTester">
+    <div class="container mx-auto px-4 py-8">
+        <h1 class="text-3xl font-bold mb-6 text-center text-gray-800">WebVTT Tester (30fps時間管理版)</h1>
+        
+        <div class="mb-4">
+            <label for="audioFile" class="block text-sm font-medium text-gray-700 mb-1">音声ファイル：</label>
+            <input type="file" id="audioFile" @change="handleAudioFileSelect" accept="audio/*" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+        
+        <div class="mb-4">
+            <label for="vttFile" class="block text-sm font-medium text-gray-700 mb-1">WebVTTファイル：</label>
+            <input type="file" id="vttFile" @change="handleVTTFileSelect" accept=".vtt" class="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-indigo-500 focus:border-indigo-500">
+        </div>
+        
+        <button @click="loadMedia" class="w-full bg-indigo-600 text-white font-bold py-2 px-4 rounded hover:bg-indigo-700 transition duration-300">ロード</button>
+        
+        <div class="mt-6">
+            <audio x-ref="audio" controls class="w-full">
+                <track x-ref="track" kind="subtitles" srclang="ja" label="日本語" default>
+                お使いのブラウザは audio タグをサポートしていません。
+            </audio>
+        </div>
+        
+        <div id="transcript" class="mt-6 bg-white p-4 rounded-lg shadow"></div>
+        
+        <div class="mt-6 bg-gray-200 p-4 rounded-lg">
+            <h2 class="text-lg font-bold mb-2">デバッグ情報:</h2>
+            <pre x-text="debugInfo" class="whitespace-pre-wrap"></pre>
+        </div>
+    </div>
+
+    <script>
+        function parseComplexVTT(vttContent) {
+            const lines = vttContent.trim().split('\n');
+            const cues = [];
+            let currentCue = null;
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (line === 'WEBVTT' || line === '' || /^\d+$/.test(line)) continue;
+                
+                if (line.includes('-->')) {
+                    const [start, end] = line.split('-->').map(time => time.trim());
+                    currentCue = { start, end, text: '' };
+                    cues.push(currentCue);
+                } else if (currentCue) {
+                    const words = line.split(/<(\d{2}:\d{2}:\d{2}\.\d{3})>/);
+                    for (let j = 0; j < words.length; j += 2) {
+                        const word = words[j].trim();
+                        const timestamp = words[j + 1] || currentCue.end;
+                        if (word) {
+                            currentCue.text += `<span class="word-timestamp" data-time="${timestamp}"><span class="timestamp">${timestamp}</span>${word}</span>`;
+                        }
+                    }
+                }
+            }
+
+            return cues;
+        }
+
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('webVTTTester', () => ({
+                audioFile: null,
+                vttFile: null,
+                debugInfo: '',
+                audioLoaded: false,
+                animationFrameId: null,
+                lastUpdateTime: 0,
+                currentPlaybackTime: 0,
+                fpsInterval: 1000 / 30, // 30fps
+
+                init() {
+                    this.addDebugInfo('Initializing webVTTTester');
+                    this.$nextTick(() => {
+                        this.setupEventListeners();
+                    });
+                },
+
+                addDebugInfo(info) {
+                    this.debugInfo += info + '\n';
+                    console.log(info);
+                },
+
+                handleAudioFileSelect(event) {
+                    this.audioFile = event.target.files[0];
+                    this.addDebugInfo('Audio file selected: ' + this.audioFile.name);
+                },
+
+                handleVTTFileSelect(event) {
+                    this.vttFile = event.target.files[0];
+                    this.addDebugInfo('WebVTT file selected: ' + this.vttFile.name);
+                },
+
+                loadMedia() {
+                    if (this.audioFile && this.vttFile) {
+                        const audio = this.$refs.audio;
+                        audio.src = URL.createObjectURL(this.audioFile);
+                        
+                        const reader = new FileReader();
+                        reader.onload = (e) => {
+                            const vttContent = e.target.result;
+                            const cues = parseComplexVTT(vttContent);
+                            this.generateTranscriptHTML(cues);
+                        };
+                        reader.readAsText(this.vttFile);
+
+                        this.addDebugInfo('Files loaded.');
+                        this.audioLoaded = true;
+                    } else {
+                        this.addDebugInfo('Please select both audio and WebVTT files.');
+                    }
+                },
+
+                setupEventListeners() {
+                    const audio = this.$refs.audio;
+
+                    audio.addEventListener('loadedmetadata', () => {
+                        this.addDebugInfo(`Audio duration: ${audio.duration} seconds`);
+                    });
+
+                    audio.addEventListener('play', () => {
+                        this.addDebugInfo('Audio playback started.');
+                        this.startTimeManagement();
+                    });
+
+                    audio.addEventListener('pause', () => {
+                        this.addDebugInfo('Audio playback paused.');
+                        this.stopTimeManagement();
+                    });
+
+                    audio.addEventListener('ended', () => {
+                        this.addDebugInfo('Audio playback ended.');
+                        this.stopTimeManagement();
+                    });
+
+                    audio.addEventListener('error', (e) => {
+                        this.addDebugInfo(`Audio error: ${audio.error.code} - ${audio.error.message}`);
+                    });
+
+                    this.addDebugInfo('Event listeners added.');
+                },
+
+                startTimeManagement() {
+                    let lastFrameTime = performance.now();
+                    const updateTranscript = (timestamp) => {
+                        if (this.$refs.audio.paused) return;
+
+                        const elapsed = timestamp - lastFrameTime;
+                        if (elapsed > this.fpsInterval) {
+                            lastFrameTime = timestamp - (elapsed % this.fpsInterval);
+                            this.currentPlaybackTime = this.$refs.audio.currentTime;
+                            this.updateTranscript(this.currentPlaybackTime + 0.5);  // 0.5秒先行
+                        }
+
+                        this.animationFrameId = requestAnimationFrame(updateTranscript);
+                    };
+
+                    this.currentPlaybackTime = this.$refs.audio.currentTime;
+                    this.animationFrameId = requestAnimationFrame(updateTranscript);
+                },
+
+                stopTimeManagement() {
+                    if (this.animationFrameId) {
+                        cancelAnimationFrame(this.animationFrameId);
+                        this.animationFrameId = null;
+                    }
+                },
+
+                updateTranscript(currentTime) {
+                    const transcriptParagraphs = document.querySelectorAll('#transcript p');
+                    
+                    transcriptParagraphs.forEach(p => {
+                        const start = this.parseTimestamp(p.dataset.start);
+                        const end = this.parseTimestamp(p.dataset.end);
+
+                        if (currentTime >= start && currentTime <= end) {
+                            p.classList.add('font-bold', 'text-indigo-600');
+                            this.highlightWords(p, currentTime);
+                        } else {
+                            p.classList.remove('font-bold', 'text-indigo-600');
+                            this.resetWords(p);
+                        }
+                    });
+                },
+
+                generateTranscriptHTML(cues) {
+                    let transcriptHtml = '';
+                    cues.forEach((cue, index) => {
+                        transcriptHtml += `<p class="mb-2" data-start="${cue.start}" data-end="${cue.end}">${cue.text}</p>`;
+                    });
+                    document.getElementById('transcript').innerHTML = transcriptHtml;
+                    this.addDebugInfo('Transcript HTML generated.');
+                },
+
+                highlightWords(paragraph, currentTime) {
+                    const words = paragraph.querySelectorAll('.word-timestamp');
+                    const endTime = this.parseTimestamp(paragraph.dataset.end);
+                    words.forEach((word, index) => {
+                        const time = this.parseTimestamp(word.dataset.time);
+                        if (currentTime >= time || (index === words.length - 1 && currentTime >= endTime)) {
+                            word.classList.add('bg-yellow-200');
+                        } else {
+                            word.classList.remove('bg-yellow-200');
+                        }
+                    });
+                },
+
+                resetWords(paragraph) {
+                    const words = paragraph.querySelectorAll('.word-timestamp');
+                    words.forEach(word => {
+                        word.classList.remove('bg-yellow-200');
+                    });
+                },
+
+                parseTimestamp(timestamp) {
+                    const [hours, minutes, seconds] = timestamp.split(':').map(parseFloat);
+                    return hours * 3600 + minutes * 60 + seconds;
+                }
+            }));
+        });
+    </script>
+</body>
+</html>
